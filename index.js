@@ -176,11 +176,15 @@ function sendOrders(accession, tests = []) {
     console.log("➡️ ENQ отправлен, ждём ACK");
 }
 
-setTimeout(() => {
-    sendOrders("1000101", ["NA", "K", "CL", "ALB", "BUN", "CA"]);
-}, 1000);
+// setTimeout(() => {
+//     sendOrders("1000101", ["NA", "K", "CL", "ALB", "BUN", "CA"]);
+// }, 1000);
 
-// 🔑 Обязательные моменты ASTM/IMMULITE протокола
+// setTimeout(() => {
+//     sendOrders("1000101", ["TSH", "LH", "FSH", "DGX", "T4", "HCG",'TU','RTH','T3','FER','PSA','PAP']);
+// }, 1000);
+
+//  Обязательные моменты ASTM/IMMULITE протокола
 
 // Уровень порта (физика RS-232)
 // 9600 baud
@@ -237,3 +241,144 @@ setTimeout(() => {
 // проверять checksum,
 // склеивать H/P/O/L в полноценный заказ или R в результаты.
 // Логировать всё в «сыром» виде (hex + ASCII) для отладки.
+
+
+
+// [Record Type (H)] [Delimiter Def.] [Message Control
+// ID] [Password] [Sending systems company name]
+// [Sending Systems address] [Reserved] [Senders
+// Phone#] [Communication parameters] [Receiver ID]
+// [Comments/special instructions] [Processing ID]
+// [Version#] [Message Date + Time]
+// <STX>[FrameNumber]H|\^&||Password|Siemens|Randolph^ 
+// New^Jersey^07869||(201)927-
+// 2828|8N1|YourSystem||P|1|19940323082858
+// <CR><ETX>[CheckSum]<CR><LF></LF>  
+
+// RECEIVER ID - IMMULITE
+
+// "Sender ID - LIS"
+
+
+
+
+// [Record Type (P)][Sequence #][Practice Assigned
+// Patient ID][Laboratory Assigned Patient ID][Patient
+// ID][Patient Name][Mother's Maiden
+// Name][BirthDate][Patient Sex][Patient Race][Patient
+// Address][Reserved][Patient Phone #][Attending
+// Physician ID][Special Field 1][Special Field
+// 2][Patient Height][Patient Weight][Patients Known
+// or Suspected Diagnosis] [Patient active
+// medications][Patients Diet][Practice Field
+// #1][Practice Field #2][Admission and Discharge
+// Dates][Admission Status][Location][Nature of
+// Alternative Diagnostic Code and
+// Classification][Alternative Diagnostic Code and
+// Classification][Patient Religion][Marital
+// Status][Isolation Status][Language][Hospital
+// Service][Hospital Institution][Dosage Category]
+// <STX>[FrameNumber]P|1|101|||Riker^Al||19611102|F|||
+// ||Bashere<CR><ETX>[CheckSum]<CR><LF></LF>
+
+
+// [Record Type (O)][Sequence#][Specimen ID
+// (Accession#)][Instrument Specimen ID][Universal
+// Test ID][Priority][Order Date/Time][Collection
+// Date/Time][Collection End Time][Collection
+// Volume][Collector ID][Action Code][Danger
+// Code][Relevant Clinical Info][Date/Time Specimen
+// Received][Specimen Descriptor,Specimen
+// Type,Specimen Source][Ordering
+// Physician][Physician's Telephone Number][User Field
+// No.1][User Field No.2][Lab Field No.1][Lab Field
+// No.2][Date/Time results reported or last
+// modified][Instrument Charge to Computer
+// System][Instrument Section ID][Report
+// Types][Reserved Field][Location or ward of Specimen
+// Collection][Nosocomial Infection Flag][Specimen
+// Service][Specimen Institution]
+// <STX>[FrameNumber]O|1|1550623||^^^LH|R|199310110912
+// 33|19931011091233<CR><ETX>[CheckSum]<CR><LF></LF>
+
+
+
+
+
+// [Record Type (R)][Sequence #][Universal Test
+// ID][Data (result)][Units][ReferenceRanges] [Result
+// abnormal flags][Nature of Abnormality
+// Testing][Result Status][Date of change in
+// instruments normal values or units][Operator
+// ID][Date\Time Test Started][Date\Time Test
+// Completed][Instrument ID]
+// 6DPSOH5HVXOW0HVVDJH
+// <STX>[FrameNumber]R|1|^^^LH|8.2|mIU/
+// mL|.7\.7^400\400|N|N|F||test|19931011091233|1993101
+// 1091233|Siemens<CR><ETX>[CheckSum]<CR><LF>
+
+
+
+// [Record Type (H)] [Delimiter Def.] [Message Control ID]
+// [Password] [Sending systems company name] [Sending Systems
+// address] [Reserved] [Senders Phone#] [Communication
+// parameters] [Receiver ID] [Comments/special instructions]
+// [Processing ID] [Version#] [Message Date + Time]
+// 1H|\^&||PASSWORD|DPC||Flanders^New^Jersey^07836||973-927-
+// 2828|N81|Your System||P|1|19940407120613<CR><ETX>[51
+// Checksum] <CR><LF>
+
+// <ENQ>
+// Header
+// Patient 1
+// Order 1
+// Order 2
+// Order 3
+// Terminator
+// <EOT>
+
+// [Record Type (P)][Sequence #][Practice Assigned Patient
+// ID][Laboratory Assigned Patient ID][Patient ID][Patient
+// Name][Mother's Maiden Name][BirthDate][Patient
+// Sex][Patient Race][Patient Address][Reserved][Patient
+// Phone #][Attending Physician ID][Special Field
+// 1][Special Field 2][Patient Height][Patient
+// Weight][Patients Known or Suspected Diagnosis] [Patient
+// active medications][Patients Diet][Practice Field
+// #1][Practice Field #2][Admission and Discharge
+// Dates][Admission Status][Location][Nature of
+// Alternative Diagnostic Code and
+// Classification][Alternative Diagnostic Code and
+// Classification][Patient Religion][Marital
+// Status][Isolation Status][Language][Hospital
+// Service][Hospital Institution][Dosage Category]
+// 2P|1|101|||Riker^Al||19611102|F|||||Bashere<CR><ETX>[2ACheck
+// Sum] <CR><LF>
+
+// [Record Type (O)][Sequence#][Specimen ID
+// (Accession#)][Instrument Specimen ID][Universal Test
+// ID][Priority][Order Date/Time][Collection Date/
+// Time][Collection End Time][Collection
+// Volume][Collector ID][Action Code][Danger
+// Code][Relevant Clinical Info][Date/Time Specimen
+// Received][Specimen Descriptor,Specimen Type,Specimen
+// Source][Ordering Physician][Physician's Telephone
+// Number][User Field No.1][User Field No.2][Lab Field
+// No.1][Lab Field No.2][Date/Time results reported or
+// last modified][Instrument Charge to Computer
+// System][Instrument Section ID][Report Types][Reserved
+// Field][Location or ward of Specimen
+// Collection][Nosocomial Infection Flag][Specimen
+// Service][Specimen Institution]
+// 3O|1|1550623||^^^LH|R|19931011091233|19931011091233
+// <CR><ETX>[6C Checksum] <CR><LF>
+
+// [Record Type (R)][Sequence #][Universal Test ID][Data
+// (result)][Units][ReferenceRanges] [Result abnormal
+// flags][Nature of Abnormality Testing][Result
+// Status][Date of change in instruments normal values or
+// units][Operator ID][Date\Time Test Started][Date\Time
+// Test Completed][Instrument ID]
+// 4R|1|^^^LH|8.2|mIU/
+// mL|.7\.7^400\400|N|N|F||test|19931011091233|1993101109
+// 1233|DPC<CR><ETX>[8FCheckSum] <CR><LF></LF>
