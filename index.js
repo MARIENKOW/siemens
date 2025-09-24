@@ -36,16 +36,14 @@
 // }
 
 import { SerialPort } from "serialport";
-import { ReadlineParser } from "@serialport/parser-readline";
 
 const port = new SerialPort({
-    path: "COM3", // свой порт
+    path: "COM4", // свой порт
     baudRate: 9600,
     dataBits: 8,
     stopBits: 1,
     parity: "none",
 });
-const parser = port.pipe(new ReadlineParser({ delimiter: "\r\n" }));
 
 const CODES = {
     ENQ: String.fromCharCode(5),
@@ -58,35 +56,14 @@ const CODES = {
     LF: String.fromCharCode(10),
 };
 
-//!-----------------------------------------------------------------------------
-// function calcChecksum(frameOrCore) {
-//     const STX = "\x02";
-//     const ETX = "\x03";
-
-//     // если передали полный фрейм с STX/ETX — возьмём между ними (включая ETX)
-//     const stx = frameOrCore.indexOf(STX);
-//     const etx = frameOrCore.indexOf(ETX);
-//     let core;
-//     if (stx !== -1 && etx !== -1 && etx > stx) {
-//         core = frameOrCore.slice(stx + 1, etx + 1); // <-- включает ETX
-//     } else {
-//         // если передали только core (frameNum + body + CR) — добавляем ETX вручную
-//         core = frameOrCore + ETX;
-//     }
-
-//     let sum = 0;
-//     for (let i = 0; i < core.length; i++) sum += core.charCodeAt(i);
-//     sum &= 0xff;
-//     return sum.toString(16).toUpperCase().padStart(2, "0");
-// }
-//!-----------------------------------------------------------------------------
+const HEADER_BODY = `H|\\^&||DPC|Receiver|||||Sender||T||`;
+const TERMINATE_BODY = `L|1|N`;
 
 function calcChecksum(frame) {
     let sum = 0;
     for (let i = 0; i < frame.length; i++) {
         sum += frame.charCodeAt(i);
     }
-    console.log(sum);
     const cs = (sum % 256).toString(16).toUpperCase().padStart(2, "0");
     return cs;
 }
@@ -97,33 +74,23 @@ function makeFrame(frameNum, body) {
     return `${CODES.STX}${core}${cs}${CODES.CR}${CODES.LF}`;
 }
 
-// ====== Приём входящих ======
-parser.on("data", (data) => {
-    console.log("Пришло:", JSON.stringify(data));
+port.on("data", (data) => {
+    console.log("Пришло (json):", JSON.stringify(data));
+    console.log("Пришло (data):", data);
 
-    if (data.includes(CODES.ENQ)) {
+    if (data?.data === CODES.ENQ) {
         console.log("Отправляем ACK");
         port.write(CODES.ACK);
     }
 
-    if (data.includes("|Q|")) {
-        console.log("Получен Query:", data);
-        // тут можно вызвать sendOrders() автоматически
-    }
-
-    if (data.includes("|R|")) {
-        console.log("Результаты:", data);
-    }
-
-    if (data.includes(CODES.EOT)) {
+    if (data?.data === CODES.EOT) {
         console.log("Сессия завершена");
     }
 });
-
 port.on("open", () => console.log("COM порт открыт, сервер готов."));
 port.on("error", (err) => console.error("Ошибка:", err.message));
 
-function sendOrders(accession, tests = []) {
+function makeFramesArray(accessions) {
     const frames = [];
     let f = 1;
     const frameCount = (atr) => {
@@ -135,114 +102,65 @@ function sendOrders(accession, tests = []) {
         return ++f;
     };
 
-    frames.push(makeFrame(frameCount(true), `H|\\^&||||||||||T||`)); // Header
-    frames.push(makeFrame(frameCount(), `P|1|${accession}`)); // Patient
-    tests.forEach((t, i) => {
-        frames.push(
-            makeFrame(
-                frameCount(),
-                `O|${i + 1}|${accession}||^^^${t}|||||||||||1||||||||||`
-            )
-        );
+    frames.push(makeFrame(frameCount(true), HEADER_BODY));
+    accessions.forEach((obj, i) => {
+        const { accession, tests } = obj;
+        frames.push(makeFrame(frameCount(), `P|${i + 1}|${accession}`));
+        tests.forEach((test, j) => {
+            frames.push(
+                makeFrame(
+                    frameCount(),
+                    `O|${j + 1}|${accession}||^^^${test}|||||||||||1||||||||||`
+                )
+            );
+        });
     });
-    frames.push(makeFrame(frameCount(), `L|1|N`)); // Terminator
 
-    console.log("Готовим заказ для", accession, tests);
+    frames.push(makeFrame(frameCount(), TERMINATE_BODY));
+    return frames;
+}
+
+function sendOrders(accessions) {
+    const frames = makeFramesArray(accessions);
+
+    let current = 0;
+
     console.log(frames);
 
-    let current = -1; // какой кадр
-
-    // === слушаем ACK от прибора ===
     const ackHandler = (data) => {
-        if (data.includes(CODES.ACK)) {
+        if (data?.data === CODES.ACK) {
             console.log("📥 ACK получен");
 
-            current++;
             if (current < frames.length) {
                 const frame = frames[current];
                 console.log("➡️ Отправляем кадр:", frame);
+                current++;
                 port.write(frame);
             } else {
                 console.log("➡️ Все кадры отправлены, шлём EOT");
                 port.write(CODES.EOT);
-                parser.off("data", ackHandler);
+                port.off("data", ackHandler);
             }
+        } else {
+            console.log("пришел не АСК:", JSON.stringify(data));
         }
     };
 
-    parser.on("data", ackHandler);
-
+    port.on("data", ackHandler);
     port.write(CODES.ENQ);
-    console.log("➡️ ENQ отправлен, ждём ACK");
+    console.log("ENQ отправлен, ждём ACK");
 }
 
 // setTimeout(() => {
-//     sendOrders("1000101", ["NA", "K", "CL", "ALB", "BUN", "CA"]);
+//     sendOrders([{ accession: "21042389", tests: ["RTH"] }]);
 // }, 1000);
-
-// setTimeout(() => {
-//     sendOrders("1000101", ["TSH", "LH", "FSH", "DGX", "T4", "HCG",'TU','RTH','T3','FER','PSA','PAP']);
-// }, 1000);
-
-//  Обязательные моменты ASTM/IMMULITE протокола
-
-// Уровень порта (физика RS-232)
-// 9600 baud
-// 8 data bits
-// 1 stop bit
-// no parity
-// null-modem кабель (обязательно перекрещённый).
-
-// Базовый хэндшейк
-// LIS шлёт ENQ.
-// IMMULITE отвечает ACK.
-// LIS отправляет кадр (STX … ETX + checksum + CRLF).
-// IMMULITE подтверждает ACK или отбрасывает NAK.
-// После последнего кадра LIS шлёт EOT.
-// Это называется Block Transfer.
-
-// Checksum (BCC)
-// После ETX идёт двухсимвольный контрольный код (hex), рассчитанный по всем байтам от STX до ETX.
-// надо проверить: считается модуль 256 от суммы байтов.
-
-// Структура сообщений
-// H (Header) — начало сессии.
-// P (Patient) — данные пациента или просто ID.
-// O (Order) — список тестов.
-// L (Terminator) — завершение заказа.
-// Иногда R (Result) приходит от IMMULITE при ответе.
-
-// Кадровая нумерация
-// Перед каждым блоком (после STX) идёт номер кадра (1–7, потом по кругу).
-
-//  Моменты, которые пока не реализованы
-// Обработка NAK
-// Если IMMULITE отвечает NAK, LIS должен повторить последний кадр.
-// Таймаут ожидания
-// Если после ENQ или кадра ACK/NAK не пришёл за X секунд (обычно 15 сек), нужно прервать транзакцию.
-// Сейчас ожидание бесконечное.
-// Приём данных от IMMULITE
-// IMMULITE может сам присылать результаты (R|...) или сообщения об ошибке.
-// Нужно уметь парсить входящие кадры (разбивать по STX/ETX и проверять checksum).
-// Пакеты могут быть длинные
-// Один логический заказ иногда разбивается на несколько кадров (особенно много тестов).
-// при приёме нужно склеивать блоки в одно сообщение до L|....
-// Завершение сессии
-// После EOT IMMULITE может прислать свои ответы.
-// Нужно оставить порт открытым и слушать.
 
 //  Рекомендации по улучшению
-// Сделать State Machine:
-// IDLE → SEND_ENQ → WAIT_ACK → SEND_FRAME → WAIT_ACK → … → SEND_EOT → DONE.
 // Добавить обработку NAK: если NAK, повторяем тот же кадр до 3 раз.
+// Добавить обработку EOT.
 // Добавить таймауты ожидания (например, 15 секунд).
 // Реализовать парсер входящих сообщений:
-// выделять кадры по STX/ETX,
-// проверять checksum,
-// склеивать H/P/O/L в полноценный заказ или R в результаты.
 // Логировать всё в «сыром» виде (hex + ASCII) для отладки.
-
-
 
 // [Record Type (H)] [Delimiter Def.] [Message Control
 // ID] [Password] [Sending systems company name]
@@ -250,17 +168,14 @@ function sendOrders(accession, tests = []) {
 // Phone#] [Communication parameters] [Receiver ID]
 // [Comments/special instructions] [Processing ID]
 // [Version#] [Message Date + Time]
-// <STX>[FrameNumber]H|\^&||Password|Siemens|Randolph^ 
+// <STX>[FrameNumber]H|\^&||Password|Siemens|Randolph^
 // New^Jersey^07869||(201)927-
 // 2828|8N1|YourSystem||P|1|19940323082858
-// <CR><ETX>[CheckSum]<CR><LF></LF>  
+// <CR><ETX>[CheckSum]<CR><LF></LF>
 
 // RECEIVER ID - IMMULITE
 
 // "Sender ID - LIS"
-
-
-
 
 // [Record Type (P)][Sequence #][Practice Assigned
 // Patient ID][Laboratory Assigned Patient ID][Patient
@@ -281,7 +196,6 @@ function sendOrders(accession, tests = []) {
 // <STX>[FrameNumber]P|1|101|||Riker^Al||19611102|F|||
 // ||Bashere<CR><ETX>[CheckSum]<CR><LF></LF>
 
-
 // [Record Type (O)][Sequence#][Specimen ID
 // (Accession#)][Instrument Specimen ID][Universal
 // Test ID][Priority][Order Date/Time][Collection
@@ -301,10 +215,6 @@ function sendOrders(accession, tests = []) {
 // <STX>[FrameNumber]O|1|1550623||^^^LH|R|199310110912
 // 33|19931011091233<CR><ETX>[CheckSum]<CR><LF></LF>
 
-
-
-
-
 // [Record Type (R)][Sequence #][Universal Test
 // ID][Data (result)][Units][ReferenceRanges] [Result
 // abnormal flags][Nature of Abnormality
@@ -316,8 +226,6 @@ function sendOrders(accession, tests = []) {
 // <STX>[FrameNumber]R|1|^^^LH|8.2|mIU/
 // mL|.7\.7^400\400|N|N|F||test|19931011091233|1993101
 // 1091233|Siemens<CR><ETX>[CheckSum]<CR><LF>
-
-
 
 // [Record Type (H)] [Delimiter Def.] [Message Control ID]
 // [Password] [Sending systems company name] [Sending Systems
@@ -382,3 +290,36 @@ function sendOrders(accession, tests = []) {
 // 4R|1|^^^LH|8.2|mIU/
 // mL|.7\.7^400\400|N|N|F||test|19931011091233|1993101109
 // 1233|DPC<CR><ETX>[8FCheckSum] <CR><LF></LF>
+
+
+
+// console.log(`
+// Ave^Randolph^NJ^07869||(201)927-2828|N81|Receiver||P|1|20250924115456<ETX>AC<LF>
+// <STX>2P|1|21042389|||||||||||<ETX>AC<LF>
+// <STX>3O|1|21042389||^^^RTH||||||||||||||||||||D0665<ETX>1D<LF>
+// <STX>4R|1|^^^RTH|1.31|uIU/mL|0.4000.010^4.0075.0|N|N|F|||20250924111534|20250924115241|D0665<ETX>E0<LF>
+// <EOT>
+// <STX>5L|1<ETX>3E<LF>
+// <EOT>`);
+
+// const buffArr1 =
+//     `Пришло: {"type":"Buffer","data":[5]} <Buffer 05> Пришло: {"type":"Buffer","data":[2]} <Buffer 02> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[72]} <Buffer 48> Пришло: {"type":"Buffer","data":[124,92]} <Buffer 7c 5c> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[38]} <Buffer 26> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[68]} <Buffer 44> Пришло: {"type":"Buffer","data":[80]} <Buffer 50> Пришло: {"type":"Buffer","data":[67]} <Buffer 43> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[83]} <Buffer 53> Пришло: {"type":"Buffer","data":[101]} <Buffer 65> Пришло: {"type":"Buffer","data":[110]} <Buffer 6e> Пришло: {"type":"Buffer","data":[100]} <Buffer 64> Пришло: {"type":"Buffer","data":[101]} <Buffer 65> Пришло: {"type":"Buffer","data":[114]} <Buffer 72> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[32]} <Buffer 20> Пришло: {"type":"Buffer","data":[67]} <Buffer 43> Пришло: {"type":"Buffer","data":[97]} <Buffer 61> Пришло: {"type":"Buffer","data":[110]} <Buffer 6e> Пришло: {"type":"Buffer","data":[102]} <Buffer 66> Пришло: {"type":"Buffer","data":[105]} <Buffer 69> Пришло: {"type":"Buffer","data":[101]} <Buffer 65> Пришло: {"type":"Buffer","data":[108]} <Buffer 6c> Пришло: {"type":"Buffer","data":[100]} <Buffer 64> Пришло: {"type":"Buffer","data":[32]} <Buffer 20> Пришло: {"type":"Buffer","data":[65]} <Buffer 41> Пришло: {"type":"Buffer","data":[118]} <Buffer 76> Пришло: {"type":"Buffer","data":[101]} <Buffer 65> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[82]} <Buffer 52> Пришло: {"type":"Buffer","data":[97]} <Buffer 61> Пришло: {"type":"Buffer","data":[110]} <Buffer 6e> Пришло: {"type":"Buffer","data":[100]} <Buffer 64> Пришло: {"type":"Buffer","data":[111]} <Buffer 6f> Пришло: {"type":"Buffer","data":[108]} <Buffer 6c> Пришло: {"type":"Buffer","data":[112]} <Buffer 70> Пришло: {"type":"Buffer","data":[104]} <Buffer 68> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[78]} <Buffer 4e> Пришло: {"type":"Buffer","data":[74]} <Buffer 4a> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[55]} <Buffer 37> Пришло: {"type":"Buffer","data":[56]} <Buffer 38> Пришло: {"type":"Buffer","data":[54]} <Buffer 36> Пришло: {"type":"Buffer","data":[57]} <Buffer 39> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[40]} <Buffer 28> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[41]} <Buffer 29> Пришло: {"type":"Buffer","data":[57]} <Buffer 39> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[55]} <Buffer 37> Пришло: {"type":"Buffer","data":[45]} <Buffer 2d> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[56]} <Buffer 38> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[56]} <Buffer 38> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[78]} <Buffer 4e> Пришло: {"type":"Buffer","data":[56]} <Buffer 38> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[82]} <Buffer 52> Пришло: {"type":"Buffer","data":[101]} <Buffer 65> Пришло: {"type":"Buffer","data":[99]} <Buffer 63> Пришло: {"type":"Buffer","data":[101]} <Buffer 65> Пришло: {"type":"Buffer","data":[105]} <Buffer 69> Пришло: {"type":"Buffer","data":[118]} <Buffer 76> Пришло: {"type":"Buffer","data":[101]} <Buffer 65> Пришло: {"type":"Buffer","data":[114]} <Buffer 72> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[80]} <Buffer 50> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[57]} <Buffer 39> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[54]} <Buffer 36> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[3]} <Buffer 03> Пришло: {"type":"Buffer","data":[65]} <Buffer 41> Пришло: {"type":"Buffer","data":[67]} <Buffer 43> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[10]} <Buffer 0a> Пришло: {"type":"Buffer","data":[2]} <Buffer 02> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[80]} <Buffer 50> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[56]} <Buffer 38> Пришло: {"type":"Buffer","data":[57]} <Buffer 39> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[3]} <Buffer 03> Пришло: {"type":"Buffer","data":[65]} <Buffer 41> Пришло: {"type":"Buffer","data":[67]} <Buffer 43> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[10]} <Buffer 0a> Пришло: {"type":"Buffer","data":[2]} <Buffer 02> Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[79]} <Buffer 4f> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[56]} <Buffer 38> Пришло: {"type":"Buffer","data":[57]} <Buffer 39> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[82]} <Buffer 52> Пришло: {"type":"Buffer","data":[84]} <Buffer 54> Пришло: {"type":"Buffer","data":[72]} <Buffer 48> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[68]} <Buffer 44> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[54]} <Buffer 36> Пришло: {"type":"Buffer","data":[54]} <Buffer 36> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[3]} <Buffer 03> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[68]} <Buffer 44> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[10]} <Buffer 0a> Пришло: {"type":"Buffer","data":[2]} <Buffer 02> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[82]} <Buffer 52> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[82]} <Buffer 52> Пришло: {"type":"Buffer","data":[84]} <Buffer 54> Пришло: {"type":"Buffer","data":[72]} <Buffer 48> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[46]} <Buffer 2e> Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[117]} <Buffer 75> Пришло: {"type":"Buffer","data":[73]} <Buffer 49> Пришло: {"type":"Buffer","data":[85]} <Buffer 55> Пришло: {"type":"Buffer","data":[47]} <Buffer 2f> Пришло: {"type":"Buffer","data":[109]} <Buffer 6d> Пришло: {"type":"Buffer","data":[76]} <Buffer 4c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[46]} <Buffer 2e> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[92]} <Buffer 5c> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[46]} <Buffer 2e> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[94]} <Buffer 5e> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[46]} <Buffer 2e> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[92]} <Buffer 5c> Пришло: {"type":"Buffer","data":[55]} <Buffer 37> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[46]} <Buffer 2e> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[78]} <Buffer 4e> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[78]} <Buffer 4e> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[70]} <Buffer 46> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[57]} <Buffer 39> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[57]} <Buffer 39> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[50]} <Buffer 32> Пришло: {"type":"Buffer","data":[52]} <Buffer 34> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[68]} <Buffer 44> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[54]} <Buffer 36> Пришло: {"type":"Buffer","data":[54]} <Buffer 36> Пришло: {"type":"Buffer","data":[53]} <Buffer 35> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[3]} <Buffer 03> Пришло: {"type":"Buffer","data":[69]} <Buffer 45> Пришло: {"type":"Buffer","data":[48]} <Buffer 30> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[10]} <Buffer 0a> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[2]} <Buffer 02> Пришло: {"type":"Buffer","data":[53,76]} <Buffer 35 4c> Пришло: {"type":"Buffer","data":[124]} <Buffer 7c> Пришло: {"type":"Buffer","data":[49]} <Buffer 31> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[3]} <Buffer 03> Пришло: {"type":"Buffer","data":[51]} Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[69]} Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[69]} Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[51]} Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[69]} <Buffer 45> Пришло: {"type":"Buffer","data":[13]} Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[69]} <Buffer 45> Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[69]} Пришло: {"type":"Buffer","data":[51]} <Buffer 33> Пришло: {"type":"Buffer","data":[69]} <Buffer 33> Пришло: {"type":"Buffer","data":[69]} <Buffer 45> Пришло: {"type":"Buffer","data":[69]} <Buffer 45> <Buffer 45> Пришло: {"type":"Buffer","data":[13]} <Buffer 0d> Пришло: {"type":"Buffer","data":[10]} <Buffer 0a> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> <Buffer 0a> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04> Пришло: {"type":"Buffer","data":[4]} <Buffer 04>`
+//         .split(" ")
+//         .filter((e) => {
+//             try {
+//                 const obj = JSON.parse(e);
+//                 if (obj instanceof Object) return true;
+//             } catch (error) {
+//                 return false;
+//             }
+//         });
+
+// const buffP = buffArr1.map((e) => Buffer.from(JSON.parse(e).data));
+
+// console.log( Buffer.concat(buffP).toString());
+// console.log( [Buffer.concat(buffP).toString()]);
+
+// console.log("---------------------------------------------------");
+
+// console.log(buffP.join("") === Buffer.concat(buffP).toString());
+// console.log([buffP.join("")]);
